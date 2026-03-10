@@ -6,6 +6,7 @@ import {
   deleteSchedule
 } from "../services/supabaseService";
 import { on, EVENTS } from "../services/eventBus";
+import jsPDF from "jspdf";
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -54,172 +55,71 @@ function formatDE(ymd) {
   return `${d}.${m}.${y}`;
 }
 
-function openPrintWindow(html) {
-  const w = window.open("", "_blank");
-  if (!w) {
-    alert("Popup wurde blockiert. Bitte Popups erlauben.");
+function isIOS() {
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+
+  // iOS kann Downloads anders behandeln -> öffnen statt "Druckseite"
+  if (isIOS()) {
+    window.open(url, "_blank");
     return;
   }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
 
-  w.onload = () => {
-    try {
-      w.focus();
-      w.print();
-    } catch {
-      // ignore
-    }
-  };
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-function buildAdminHtml({ companyName, adminName, rangeText, days, dayLines, totalsLines }) {
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Schichtplan</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #000; }
-    .topRight { position: absolute; top: 18px; right: 24px; font-size: 16px; }
-    h1 { text-align: center; font-size: 56px; margin: 0 0 18px 0; text-decoration: underline; }
-
-    .box { border: 1px solid #000; margin-bottom: 14px; }
-    .row { display: grid; grid-template-columns: 1.2fr 1fr; border-top: 1px solid #000; }
-    .row:first-child { border-top: none; }
-    .cell { padding: 10px; border-right: 1px solid #000; }
-    .row .cell:last-child { border-right: none; }
-    .bold { font-weight: 700; }
-
-    .table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    .table th, .table td { border: 1px solid #000; padding: 10px; vertical-align: top; }
-    .table th { background: #f0f0f0; text-align: left; font-weight: 700; }
-
-    .lines div { margin-bottom: 4px; }
-
-    .footerBox { border: 1px solid #000; }
-    .footerTitle { font-weight: 700; margin-bottom: 6px; }
-  </style>
-</head>
-<body>
-  <div class="topRight">${companyName}</div>
-  <h1>Schichtplan</h1>
-
-  <div class="box">
-    <div class="row">
-      <div class="cell bold">Vor- und Nachname</div>
-      <div class="cell">${adminName}</div>
-    </div>
-    <div class="row">
-      <div class="cell bold">Datum</div>
-      <div class="cell bold">${rangeText}</div>
-    </div>
-  </div>
-
-  <table class="table">
-    <thead>
-      <tr>
-        <th style="width: 30%;">Datum</th>
-        <th>Arbeiter/Stunden</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${days
-        .map((d) => {
-          const lines = dayLines[d] || [];
-          return `
-            <tr>
-              <td>${formatDE(d)}</td>
-              <td class="lines">
-                ${lines.map((x) => `<div>${x}</div>`).join("")}
-              </td>
-            </tr>
-          `;
-        })
-        .join("")}
-      <tr>
-        <td></td>
-        <td class="footerBox">
-          <div class="footerTitle">Stunden insgesamt:</div>
-          ${totalsLines.map((l) => `<div>${l}</div>`).join("")}
-        </td>
-      </tr>
-    </tbody>
-  </table>
-</body>
-</html>
-`;
+function newDoc() {
+  // A4 portrait, mm
+  return new jsPDF({ unit: "mm", format: "a4" });
 }
 
-function buildWorkerHtml({ companyName, workerName, rangeText, days, workerHoursByDay, totalHours }) {
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Schichtplan</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #000; }
-    .topRight { position: absolute; top: 18px; right: 24px; font-size: 16px; }
-    h1 { text-align: center; font-size: 56px; margin: 0 0 18px 0; text-decoration: underline; }
+function textWrap(doc, text, x, y, maxWidth, lineHeight) {
+  const lines = doc.splitTextToSize(String(text), maxWidth);
+  lines.forEach((l, i) => doc.text(l, x, y + i * lineHeight));
+  return y + lines.length * lineHeight;
+}
 
-    .box { border: 1px solid #000; margin-bottom: 14px; }
-    .row { display: grid; grid-template-columns: 1.2fr 1fr; border-top: 1px solid #000; }
-    .row:first-child { border-top: none; }
-    .cell { padding: 10px; border-right: 1px solid #000; }
-    .row .cell:last-child { border-right: none; }
-    .bold { font-weight: 700; }
+// simple table drawer (2 columns)
+function drawTableHeader(doc, x, y, w1, w2, h, leftTitle, rightTitle) {
+  doc.rect(x, y, w1 + w2, h);
+  doc.line(x + w1, y, x + w1, y + h);
+  doc.setFont(undefined, "bold");
+  doc.text(leftTitle, x + 2, y + 6);
+  doc.text(rightTitle, x + w1 + 2, y + 6);
+  doc.setFont(undefined, "normal");
+  return y + h;
+}
 
-    .table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    .table th, .table td { border: 1px solid #000; padding: 10px; vertical-align: top; }
-    .table th { background: #f0f0f0; text-align: left; font-weight: 700; }
-  </style>
-</head>
-<body>
-  <div class="topRight">${companyName}</div>
-  <h1>Schichtplan</h1>
+function drawRow(doc, x, y, w1, w2, minH, leftText, rightLines) {
+  // compute right height
+  const rightText = Array.isArray(rightLines) ? rightLines.join("\n") : String(rightLines || "");
+  const leftLines = doc.splitTextToSize(String(leftText), w1 - 4);
+  const rightSplit = doc.splitTextToSize(rightText, w2 - 4);
 
-  <div class="box">
-    <div class="row">
-      <div class="cell bold">Vor- und Nachname</div>
-      <div class="cell">${workerName}</div>
-    </div>
-    <div class="row">
-      <div class="cell bold">Datum</div>
-      <div class="cell bold">${rangeText}</div>
-    </div>
-    <div class="row">
-      <div class="cell bold">Stunden insgesamt</div>
-      <div class="cell">${totalHours}</div>
-    </div>
-  </div>
+  const lineH = 5;
+  const h = Math.max(minH, leftLines.length * lineH + 4, rightSplit.length * lineH + 4);
 
-  <table class="table">
-    <thead>
-      <tr>
-        <th style="width: 50%;">Datum</th>
-        <th>Stunden</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${days
-        .map((d) => {
-          const h = workerHoursByDay[d] ?? 0;
-          return `
-            <tr>
-              <td>${formatDE(d)}</td>
-              <td>${h}</td>
-            </tr>
-          `;
-        })
-        .join("")}
-    </tbody>
-  </table>
-</body>
-</html>
-`;
+  doc.rect(x, y, w1 + w2, h);
+  doc.line(x + w1, y, x + w1, y + h);
+
+  // left
+  doc.text(leftLines, x + 2, y + 6);
+
+  // right
+  doc.text(rightSplit, x + w1 + 2, y + 6);
+
+  return y + h;
 }
 
 function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'Ma Löbau" }) {
@@ -314,10 +214,8 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
     if (!ok) return;
 
     await deleteSchedule(selectedScheduleId);
-
     setEntries([]);
     await loadSchedules();
-
     alert("Plan gelöscht.");
   }
 
@@ -348,8 +246,11 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
   }, [allDatesInRange, entriesByDate, workerNameById]);
 
   async function handlePdfAdmin() {
+    if (!selectedScheduleId || !fromDate || !toDate) return;
+
     const data = await loadEntriesForCurrentRange();
 
+    // group by date
     const allDays = getDateRangeList(fromDate, toDate);
     const byDate = {};
     data.forEach((e) => {
@@ -367,8 +268,8 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
     });
 
     const daysWithEntries = allDays.filter((d) => (dayLines[d] || []).length > 0);
-    const rangeText = `${formatDE(fromDate)} - ${formatDE(toDate)}`;
 
+    // totals
     const totals = {};
     data.forEach((e) => {
       totals[e.worker_id] = (totals[e.worker_id] || 0) + Number(e.hours || 0);
@@ -378,19 +279,94 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
       .sort((a, b) => (workerNameById[a] || a).localeCompare(workerNameById[b] || b))
       .map((wid) => `${workerNameById[wid] || wid}: ${totals[wid]} Stunden`);
 
-    const html = buildAdminHtml({
-      companyName,
-      adminName: currentUsername || "Admin",
-      rangeText,
-      days: daysWithEntries,
-      dayLines,
-      totalsLines
-    });
+    const doc = newDoc();
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
 
-    openPrintWindow(html);
+    const margin = 15;
+
+    // Header
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(34);
+    doc.text("Schichtplan", pageW / 2, 22, { align: "center" });
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, "normal");
+    doc.text(companyName, pageW - margin, 12, { align: "right" });
+
+    // Box (Name + Datum)
+    let y = 30;
+    const boxX = margin;
+    const boxW = pageW - margin * 2;
+    const boxH = 18;
+
+    doc.rect(boxX, y, boxW, boxH);
+    doc.line(boxX + boxW / 2, y, boxX + boxW / 2, y + boxH);
+    doc.line(boxX, y + boxH / 2, boxX + boxW, y + boxH / 2);
+
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(12);
+    doc.text("Vor- und Nachname", boxX + 2, y + 6);
+    doc.text("Datum", boxX + 2, y + boxH / 2 + 6);
+
+    doc.setFont(undefined, "normal");
+    doc.text(currentUsername || "Admin", boxX + boxW / 2 + 2, y + 6);
+
+    doc.setFont(undefined, "bold");
+    doc.text(`${formatDE(fromDate)} - ${formatDE(toDate)}`, boxX + boxW / 2 + 2, y + boxH / 2 + 6);
+
+    // Table
+    y = y + boxH + 10;
+
+    const col1 = 55;
+    const col2 = boxW - col1;
+    const headerH = 10;
+    const rowMinH = 14;
+
+    doc.setFontSize(11);
+    y = drawTableHeader(doc, boxX, y, col1, col2, headerH, "Datum", "Arbeiter/Stunden");
+
+    doc.setFontSize(10);
+    for (const d of daysWithEntries) {
+      if (y + rowMinH > pageH - margin) {
+        doc.addPage();
+        y = margin;
+        doc.setFontSize(11);
+        y = drawTableHeader(doc, boxX, y, col1, col2, headerH, "Datum", "Arbeiter/Stunden");
+        doc.setFontSize(10);
+      }
+      y = drawRow(doc, boxX, y, col1, col2, rowMinH, formatDE(d), dayLines[d]);
+    }
+
+    // Totals block
+    if (y + 40 > pageH - margin) {
+      doc.addPage();
+      y = margin;
+    }
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(11);
+    doc.text("Stunden insgesamt:", boxX + col1 + 2, y + 8);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(10);
+
+    let ty = y + 14;
+    const maxW = col2 - 4;
+    for (const line of totalsLines) {
+      if (ty > pageH - margin) {
+        doc.addPage();
+        ty = margin;
+      }
+      ty = textWrap(doc, line, boxX + col1 + 2, ty, maxW, 5);
+    }
+
+    const blob = doc.output("blob");
+    const filename = `Schichtplan_Admin_${fromDate}_${toDate}.pdf`;
+    downloadBlob(blob, filename);
   }
 
   async function handlePdfWorker() {
+    if (!selectedScheduleId || !fromDate || !toDate) return;
+
     const data = await loadEntriesForCurrentRange();
 
     const allDays = getDateRangeList(fromDate, toDate);
@@ -411,19 +387,74 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
     });
 
     const daysWithHours = allDays.filter((d) => (workerHoursByDay[d] || 0) > 0);
-    const rangeText = `${formatDE(fromDate)} - ${formatDE(toDate)}`;
+
     const workerName = workerNameById[workerId] || currentUsername || "Mitarbeiter";
 
-    const html = buildWorkerHtml({
-      companyName,
-      workerName,
-      rangeText,
-      days: daysWithHours,
-      workerHoursByDay,
-      totalHours: total
-    });
+    const doc = newDoc();
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 15;
 
-    openPrintWindow(html);
+    // Header
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(34);
+    doc.text("Schichtplan", pageW / 2, 22, { align: "center" });
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, "normal");
+    doc.text(companyName, pageW - margin, 12, { align: "right" });
+
+    // Box (Name + Datum + Summe)
+    let y = 30;
+    const boxX = margin;
+    const boxW = pageW - margin * 2;
+    const boxH = 27;
+
+    doc.rect(boxX, y, boxW, boxH);
+    doc.line(boxX + boxW / 2, y, boxX + boxW / 2, y + boxH);
+    doc.line(boxX, y + boxH / 3, boxX + boxW, y + boxH / 3);
+    doc.line(boxX, y + (2 * boxH) / 3, boxX + boxW, y + (2 * boxH) / 3);
+
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(12);
+    doc.text("Vor- und Nachname", boxX + 2, y + 6);
+    doc.text("Datum", boxX + 2, y + boxH / 3 + 6);
+    doc.text("Stunden insgesamt", boxX + 2, y + (2 * boxH) / 3 + 6);
+
+    doc.setFont(undefined, "normal");
+    doc.text(workerName, boxX + boxW / 2 + 2, y + 6);
+
+    doc.setFont(undefined, "bold");
+    doc.text(`${formatDE(fromDate)} - ${formatDE(toDate)}`, boxX + boxW / 2 + 2, y + boxH / 3 + 6);
+
+    doc.setFont(undefined, "normal");
+    doc.text(String(total), boxX + boxW / 2 + 2, y + (2 * boxH) / 3 + 6);
+
+    // Table
+    y = y + boxH + 10;
+    const col1 = 80;
+    const col2 = boxW - col1;
+    const headerH = 10;
+    const rowMinH = 12;
+
+    doc.setFontSize(11);
+    y = drawTableHeader(doc, boxX, y, col1, col2, headerH, "Datum", "Stunden");
+
+    doc.setFontSize(10);
+    for (const d of daysWithHours) {
+      if (y + rowMinH > pageH - margin) {
+        doc.addPage();
+        y = margin;
+        doc.setFontSize(11);
+        y = drawTableHeader(doc, boxX, y, col1, col2, headerH, "Datum", "Stunden");
+        doc.setFontSize(10);
+      }
+      y = drawRow(doc, boxX, y, col1, col2, rowMinH, formatDE(d), [`${workerHoursByDay[d]}`]);
+    }
+
+    const blob = doc.output("blob");
+    const filename = `Schichtplan_${workerName}_${fromDate}_${toDate}.pdf`;
+    downloadBlob(blob, filename);
   }
 
   const pdfEnabled = Boolean(selectedScheduleId && fromDate && toDate);
@@ -471,7 +502,6 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
             <button onClick={handlePdfAdmin} style={btnStyle} disabled={!pdfEnabled}>
               PDF (Admin)
             </button>
-
             <button onClick={handleDeletePlan} style={dangerBtnStyle} disabled={!selectedScheduleId}>
               Plan löschen
             </button>
@@ -521,7 +551,6 @@ function ScheduleArchive({ mode, workerId, currentUsername, companyName = "Bone'
 const labelStyle = { display: "flex", flexDirection: "column", gap: "4px", fontSize: "13px" };
 const inputStyle = { padding: "6px", fontSize: "14px" };
 const btnStyle = { padding: "6px 10px", fontSize: "13px", whiteSpace: "nowrap" };
-
 const dangerBtnStyle = { ...btnStyle, border: "1px solid black" };
 
 const thStyle = {
